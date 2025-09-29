@@ -1,0 +1,7 @@
+## Interface: 11200
+## Title: TurtleBagSort
+## Notes: Simple macro-friendly bag sorter compatible with Bagnon on Turtle WoW.
+## Author: Coldsnappy
+## Version: 1.0.0
+## SavedVariables: TurtleBagSortDB
+TurtleBagSort.lua
