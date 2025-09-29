@@ -1,26 +1,20 @@
--- TurtleBagSort: Simple, macro-friendly bag sorter for Turtle WoW (1.12)
--- Works alongside Bagnon (we only move items, we don't draw frames)
+-- TurtleBagSort v1.0.1 (Turtle 1.12 safe)
+-- Key changes: VARIABLES_LOADED, no IsAddOnLoaded, conservative APIs, explicit debug
 
-local ADDON = ...
-local TBS = {}
+-- SavedVariables
 TurtleBagSortDB = TurtleBagSortDB or {}
 
--- ---------------------------
--- Config / Profiles
--- ---------------------------
--- Profiles define category priority + secondary sort.
--- priority: lower index = earlier placement (top-left in unified views)
--- secondary: "rarityDesc|nameAsc|countDesc"
-local DEFAULT_PROFILE = {
-  name = "type",
-  priority = { "Quest", "Consumable", "Trade Goods", "Reagent", "Container", "Weapon", "Armor", "Misc", "Junk" },
-  secondary = "rarityDesc|nameAsc|countDesc",
-}
+local RARITY_FALLBACK = 1
 
-local RARITY_FALLBACK = 1 -- if we fail to detect, assume common
-
+-- ---------------------------
+-- Profiles
+-- ---------------------------
 local PROFILES = {
-  ["type"]   = DEFAULT_PROFILE,
+  ["type"] = {
+    name = "type",
+    priority = { "Quest", "Consumable", "Trade Goods", "Reagent", "Container", "Weapon", "Armor", "Misc", "Junk" },
+    secondary = "rarityDesc|nameAsc|countDesc",
+  },
   ["rarity"] = {
     name = "rarity",
     priority = { "Junk", "Misc", "Container", "Reagent", "Trade Goods", "Consumable", "Armor", "Weapon", "Quest" },
@@ -33,33 +27,36 @@ local PROFILES = {
   },
 }
 
--- Allow user override persisted in SavedVariables later
 local function getActiveProfile()
-  local key = (TurtleBagSortDB and TurtleBagSortDB.profile) or "type"
-  return PROFILES[key] or DEFAULT_PROFILE
+  local key = TurtleBagSortDB.profile or "type"
+  return PROFILES[key] or PROFILES["type"]
 end
 
 -- ---------------------------
--- Utils: item/category data
+-- Utils
 -- ---------------------------
-local function safeGetItemInfo(link)
-  -- Vanilla/Turtle: GetItemInfo exists but sometimes returns nil; do basic guards.
+local function getContainerItemLinkCompat(bag, slot)
+  if GetContainerItemLink then
+    return GetContainerItemLink(bag, slot)
+  end
+  return nil
+end
+
+local function getItemInfoCompat(link)
   if not link then return nil end
   local name, _, quality, _, _, itemType, itemSubType = GetItemInfo(link)
+  name = name or (tostring(link):match("%[(.+)%]")) or "<?>"
   return {
-    name = name or (tostring(link):match("%[(.+)%]")) or "<?>",
+    name = name,
     quality = quality or RARITY_FALLBACK,
     itemType = itemType or "Misc",
     itemSubType = itemSubType or "",
   }
 end
 
-local function getContainerItemLink(bag, slot)
-  if GetContainerItemLink then
-    return GetContainerItemLink(bag, slot)
-  end
-  -- Fallback (very old clients): try tooltip scrape if needed (skipped here).
-  return nil
+local function isEmptySlot(bag, slot)
+  local texture = GetContainerItemInfo(bag, slot)
+  return texture == nil
 end
 
 local function isLocked(bag, slot)
@@ -72,12 +69,6 @@ local function getCount(bag, slot)
   return count or 1
 end
 
-local function isEmptySlot(bag, slot)
-  local texture = GetContainerItemInfo(bag, slot)
-  return texture == nil
-end
-
--- Map itemType to our coarse categories
 local function mapItemTypeToCategory(info)
   if not info then return "Misc" end
   local t = info.itemType or "Misc"
@@ -92,15 +83,12 @@ local function mapItemTypeToCategory(info)
   else return "Misc" end
 end
 
--- ---------------------------
--- Slot enumeration
--- ---------------------------
 local function allBagSlots()
   local slots = {}
-  for bag = 0, 4 do -- player bags only; bank not handled in this v1
-    local num = GetContainerNumSlots(bag)
-    if num and num > 0 then
-      for slot = 1, num do
+  for bag = 0, 4 do
+    local n = GetContainerNumSlots(bag)
+    if n and n > 0 then
+      for slot=1,n do
         table.insert(slots, {bag=bag, slot=slot})
       end
     end
@@ -108,15 +96,11 @@ local function allBagSlots()
   return slots
 end
 
--- ---------------------------
--- Key functions for sorting
--- ---------------------------
 local function makeItemRecord(bag, slot, profile)
-  local link = getContainerItemLink(bag, slot)
+  local link = getContainerItemLinkCompat(bag, slot)
   if not link then return nil end
-  local meta = safeGetItemInfo(link)
-  local cat  = mapItemTypeToCategory(meta)
-  local count = getCount(bag, slot)
+  local meta = getItemInfoCompat(link)
+  local cat = mapItemTypeToCategory(meta)
   local catRank = 999
   for i, c in ipairs(profile.priority) do
     if c == cat then catRank = i; break end
@@ -124,22 +108,18 @@ local function makeItemRecord(bag, slot, profile)
   return {
     bag=bag, slot=slot, link=link,
     name=meta.name, quality=meta.quality or RARITY_FALLBACK,
-    category=cat, catRank=catRank, count=count,
+    category=cat, catRank=catRank, count=getCount(bag, slot),
   }
 end
 
 local function secondaryComparator(a, b, spec)
-  -- spec like "rarityDesc|nameAsc|countDesc"
   local function cmpRarityDesc() if a.quality ~= b.quality then return a.quality > b.quality end end
   local function cmpNameAsc()   if a.name    ~= b.name    then return a.name    < b.name    end end
   local function cmpCountDesc() if a.count   ~= b.count   then return a.count   > b.count   end end
   for token in string.gmatch(spec, "([^|]+)") do
-    if token == "rarityDesc" then
-      local r = cmpRarityDesc(); if r ~= nil then return r end
-    elseif token == "nameAsc" then
-      local r = cmpNameAsc(); if r ~= nil then return r end
-    elseif token == "countDesc" then
-      local r = cmpCountDesc(); if r ~= nil then return r end
+    if token == "rarityDesc" then local r = cmpRarityDesc(); if r ~= nil then return r end
+    elseif token == "nameAsc" then local r = cmpNameAsc(); if r ~= nil then return r end
+    elseif token == "countDesc" then local r = cmpCountDesc(); if r ~= nil then return r end
     end
   end
   return false
@@ -147,8 +127,7 @@ end
 
 local function sortPlan(profile)
   local slots = allBagSlots()
-  local items = {}
-  local empties = {}
+  local items, empties = {}, {}
 
   for _, s in ipairs(slots) do
     if isEmptySlot(s.bag, s.slot) then
@@ -164,79 +143,42 @@ local function sortPlan(profile)
     return secondaryComparator(a, b, profile.secondary)
   end)
 
-  -- Desired target order is: items (sorted), then empty slots
   local targets = {}
   for _, s in ipairs(slots) do table.insert(targets, {bag=s.bag, slot=s.slot}) end
-
   return items, empties, targets
 end
 
--- ---------------------------
--- Swap engine
--- ---------------------------
-local function slotKey(s) return s.bag .. ":" .. s.slot end
-
-local function buildCurrentMap()
-  local map = {}
-  for bag=0,4 do
-    local n = GetContainerNumSlots(bag)
-    if n and n > 0 then
-      for slot=1,n do
-        local link = getContainerItemLink(bag, slot)
-        map[slotKey({bag=bag, slot=slot})] = link
-      end
-    end
-  end
-  return map
-end
-
 local function pickup(bag, slot) ClearCursor(); PickupContainerItem(bag, slot) end
-local function swap(a, b)
-  -- swap item at a with item at b
-  if isLocked(a.bag, a.slot) or isLocked(b.bag, b.slot) then return false end
-  pickup(a.bag, a.slot); PickupContainerItem(b.bag, b.slot); ClearCursor()
-  return true
-end
-
 local function moveIntoEmpty(from, empty)
   if isLocked(from.bag, from.slot) or isLocked(empty.bag, empty.slot) then return false end
   pickup(from.bag, from.slot); PickupContainerItem(empty.bag, empty.slot); ClearCursor()
   return true
 end
+local function swap(a, b)
+  if isLocked(a.bag, a.slot) or isLocked(b.bag, b.slot) then return false end
+  pickup(a.bag, a.slot); PickupContainerItem(b.bag, b.slot); ClearCursor()
+  return true
+end
 
--- Compute and execute placements to transform current → desired order in a single pass.
 local function executeSort(profile)
+  -- Always emit a visible message so the user knows /bagsort fired:
+  DEFAULT_CHAT_FRAME:AddMessage("|cff88ccffTurtleBagSort: sorting ("..profile.name..")...|r")
+
   if InCombatLockdown and InCombatLockdown() then
     DEFAULT_CHAT_FRAME:AddMessage("|cffff5555TurtleBagSort: cannot sort in combat.|r")
     return
   end
 
-  local items, empties, targets = sortPlan(profile)
-  -- Flatten desired links in target order (items first, empties are implicitly nil)
+  local items, _, targets = sortPlan(profile)
+
+  -- Build desired flat list of item links for target order
   local desired = {}
   for i=1,#targets do desired[i] = nil end
   for i, rec in ipairs(items) do desired[i] = rec.link end
 
-  -- Current state by linear index over targets
   local current = {}
-  for i, tgt in ipairs(targets) do
-    current[i] = getContainerItemLink(tgt.bag, tgt.slot)
-  end
+  for i, t in ipairs(targets) do current[i] = getContainerItemLinkCompat(t.bag, t.slot) end
 
-  local getSlotByIndex = function(idx) return targets[idx] end
-
-  -- Two-phase: 1) move mismatched items into their desired slots (using empties as scratch),
-  -- 2) compact any stragglers.
-  local emptyQueue = {}
-  for _, s in ipairs(targets) do
-    if isEmptySlot(s.bag, s.slot) then table.insert(emptyQueue, {bag=s.bag, slot=s.slot}) end
-  end
-
-  local function popEmpty()
-    return table.remove(emptyQueue) -- last; order doesn't matter
-  end
-
-  -- Build index of link -> list of positions (because duplicates exist)
   local function indexPositions(vec)
     local map = {}
     for idx, link in ipairs(vec) do
@@ -247,47 +189,27 @@ local function executeSort(profile)
     end
     return map
   end
+  local curIdx = indexPositions(current)
 
-  local currentIndex = indexPositions(current)
-  local desiredIndex = indexPositions(desired)
+  local function take(list) if list and #list>0 then return table.remove(list, 1) end end
+  local function getSlotByIndex(i) return targets[i] end
 
-  local function takePosition(list)
-    if not list or #list == 0 then return nil end
-    return table.remove(list, 1)
-  end
-
-  -- Ensure each desired position holds one of its desired link copies
-  for dPos, wantLink in ipairs(desired) do
-    if wantLink then
-      local cLink = current[dPos]
-      if cLink ~= wantLink then
-        -- find a current position that has wantLink
-        local srcPos = takePosition(currentIndex[wantLink])
-        if srcPos then
-          if srcPos ~= dPos then
-            -- Move item from srcPos → dPos, using direct swap if target occupied, else move into empty
-            local srcSlot = getSlotByIndex(srcPos)
-            local dstSlot = getSlotByIndex(dPos)
-            local ok
-            if not isEmptySlot(dstSlot.bag, dstSlot.slot) then
-              ok = swap(srcSlot, dstSlot)
-            else
-              ok = moveIntoEmpty(srcSlot, dstSlot)
-            end
-            if ok then
-              local tmp = current[dPos]; current[dPos] = current[srcPos]; current[srcPos] = tmp
-            end
-          end
-        else
-          -- desired link not found in current (shouldn't happen), skip
+  -- Coarse: for each desired slot, ensure it holds one matching copy
+  for dPos, want in ipairs(desired) do
+    if want and current[dPos] ~= want then
+      local srcPos = take(curIdx[want])
+      if srcPos and srcPos ~= dPos then
+        local a, b = getSlotByIndex(srcPos), getSlotByIndex(dPos)
+        local ok
+        if current[dPos] then ok = swap(a, b) else ok = moveIntoEmpty(a, b) end
+        if ok then
+          local tmp = current[dPos]; current[dPos] = current[srcPos]; current[srcPos] = tmp
         end
       end
-    else
-      -- desired is empty; we don't force an item here
     end
   end
 
-  DEFAULT_CHAT_FRAME:AddMessage("|cff55ff55TurtleBagSort: sorted using profile '" .. getActiveProfile().name .. "'.|r")
+  DEFAULT_CHAT_FRAME:AddMessage("|cff55ff55TurtleBagSort: done.|r")
 end
 
 -- ---------------------------
@@ -299,31 +221,25 @@ SlashCmdList["TURTLEBAGSORT"] = function(msg)
   if msg == "" or msg == "run" or msg == "go" then
     executeSort(getActiveProfile()); return
   end
-  if msg == "type" or msg == "rarity" or msg == "junk" then
+  if PROFILES[msg] then
     TurtleBagSortDB.profile = msg
-    DEFAULT_CHAT_FRAME:AddMessage("|cff88ff88TurtleBagSort: profile set to '" .. msg .. "'. Use /bagsort to sort.|r")
+    DEFAULT_CHAT_FRAME:AddMessage("|cff88ff88TurtleBagSort: profile set to '"..msg.."'. Use /bagsort to sort.|r")
     return
   end
-  if msg == "help" then
-    DEFAULT_CHAT_FRAME:AddMessage("|cffffff88TurtleBagSort commands:|r")
-    DEFAULT_CHAT_FRAME:AddMessage("  /bagsort           - Sort using current profile")
-    DEFAULT_CHAT_FRAME:AddMessage("  /bagsort type      - Prioritize type (default)")
-    DEFAULT_CHAT_FRAME:AddMessage("  /bagsort rarity    - Prioritize rarity")
-    DEFAULT_CHAT_FRAME:AddMessage("  /bagsort junk      - Pull junk forward, then others")
-    DEFAULT_CHAT_FRAME:AddMessage("  /bagsort help      - This help")
-    return
-  end
-  DEFAULT_CHAT_FRAME:AddMessage("|cffffaa00TurtleBagSort: unknown command. Try /bagsort help|r")
+  DEFAULT_CHAT_FRAME:AddMessage("|cffffff88TurtleBagSort commands:|r")
+  DEFAULT_CHAT_FRAME:AddMessage("  /bagsort           - Sort using current profile")
+  DEFAULT_CHAT_FRAME:AddMessage("  /bagsort type      - Prioritize item type (default)")
+  DEFAULT_CHAT_FRAME:AddMessage("  /bagsort rarity    - Prioritize rarity")
+  DEFAULT_CHAT_FRAME:AddMessage("  /bagsort junk      - Pull greys forward")
 end
 
 -- ---------------------------
--- AddOnLoaded banner (and Bagnon detection)
+-- Loader (1.12 friendly)
 -- ---------------------------
 local f = CreateFrame("Frame")
-f:RegisterEvent("PLAYER_LOGIN")
+f:RegisterEvent("VARIABLES_LOADED")
 f:SetScript("OnEvent", function()
-  local bagnonLoaded = IsAddOnLoaded and IsAddOnLoaded("Bagnon")
-  DEFAULT_CHAT_FRAME:AddMessage("|cff00d1ffTurtleBagSort loaded.|r " ..
-    (bagnonLoaded and "|cff88ff88(Bagnon detected)|r" or "|cffffaa00(Bagnon not detected)|r") ..
-    "  Use |cffffff00/bagsort|r or set profile with |cffffff00/bagsort type|r, |cffffff00/bagsort rarity|r, |cffffff00/bagsort junk|r.")
+  TurtleBagSortDB = TurtleBagSortDB or {}
+  DEFAULT_CHAT_FRAME:AddMessage("|cff00d1ffTurtleBagSort loaded.|r Use |cffffff00/bagsort|r. Profile: |cffffff00" ..
+    (TurtleBagSortDB.profile or "type") .. "|r")
 end)
